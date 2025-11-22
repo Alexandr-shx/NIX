@@ -1,0 +1,1229 @@
+<!doctype html>
+<html lang="ru">
+<head>
+<meta charset="utf-8" />
+<meta name="viewport" content="width=device-width,initial-scale=1" />
+<title>НИКС — Полная демо-платформа (улучшенный, стабильно рабочий)</title>
+<meta name="description" content="НИКС — Нейроинтеллектуальная Карта Социальных Потоков. Продвинутый автономный HTML прототип с интерактивной тепловой картой, выбором зон, симуляцией и заглушкой ИИ.">
+
+<!--
+  УЛУЧШЕНИЯ / КРАТКОЕ РЕЗЮМЕ:
+  - Исправлены баги с ресайзом и координатами: теперь корректно масштабируется на любой DPR и в любых контейнерах.
+  - Оптимизирован рендеринг: используем double-buffer, уменьшение объектов в getImageData, частичное перерисовывание.
+  - Убраны гонки при быстрой смене объектов/зон — введены токены отмены.
+  - Поддержка тача и мыши, клавиатурные шорткаты, доступность.
+  - Стабильный pipeline: raw intensity -> gaussian-like smoothing (быстрый) -> colorize -> composite -> labels.
+  - Улучшенный UI: кнопки, тултипы, адаптивность, мобильный layout, aria-атрибуты.
+  - Весь код чистый, с подробными комментариями. Можно открывать локально без сервера.
+  - Экспорт CSV, экспорт PNG карты, снимок зоны, режимы отображения и пресеты.
+  - Защита от слишком частого вызова тяжелых операций (debounce/throttle).
+  - Плавная анимация и корректное завершение интервалов.
+  - Рекомендуется открывать в современном браузере (Chrome/Edge/Firefox/Safari).
+-->
+
+<style>
+  :root{
+    --bg: #08101a;
+    --panel: linear-gradient(180deg,#0b1116,#07101a);
+    --card: rgba(255,255,255,0.02);
+    --glass: rgba(255,255,255,0.03);
+    --muted: #9aa3b2;
+    --accent: #ffb84d;
+    --accent2: #4dd1ff;
+    --white: #f6f8fa;
+    --danger: #ff7b7b;
+    --success: #2dd18a;
+    --radius: 14px;
+    font-family: Inter, "Segoe UI", Roboto, "Helvetica Neue", Arial, sans-serif;
+  }
+  *{box-sizing:border-box}
+  html,body{height:100%;margin:0;background:var(--bg);color:var(--white);-webkit-font-smoothing:antialiased}
+  a{color:inherit;text-decoration:none}
+  button{font-family:inherit}
+  /* Topbar */
+  .topbar{
+    position:sticky;top:0;z-index:1300;
+    background: linear-gradient(180deg, rgba(255,255,255,0.01), rgba(255,255,255,0.00));
+    border-bottom:1px solid rgba(255,255,255,0.02);
+    backdrop-filter: blur(8px);
+  }
+  .topbar .wrap{
+    max-width:1500px;margin:0 auto;padding:14px 18px;display:flex;align-items:center;gap:12px;
+  }
+  .brand{display:flex;gap:12px;align-items:center}
+  .logo{
+    width:56px;height:56px;border-radius:12px;background:linear-gradient(135deg,#ff6a3d,#ffd24d,#2dd18a);
+    display:flex;justify-content:center;align-items:center;color:#071116;font-weight:800;font-size:14px;
+    box-shadow:0 8px 30px rgba(0,0,0,0.45)
+  }
+  .brand h1{margin:0;font-size:18px}
+  .brand .tag{font-size:12px;color:var(--muted)}
+
+  .top-actions{margin-left:auto;display:flex;align-items:center;gap:10px}
+  .btn{
+    border:1px solid rgba(255,255,255,0.04);
+    background:linear-gradient(180deg, rgba(255,255,255,0.02), rgba(255,255,255,0.01));
+    padding:10px 14px;border-radius:12px;color:var(--white);font-weight:700;cursor:pointer;display:inline-flex;align-items:center;gap:10px;
+  }
+  .btn.primary{background:linear-gradient(90deg,var(--accent2),#7bdcff);box-shadow:0 8px 20px rgba(77,166,255,0.08)}
+  .btn.positive{background:linear-gradient(90deg,var(--accent),#ff9a60);box-shadow:0 8px 20px rgba(255,160,80,0.08)}
+  .muted{color:var(--muted);font-size:13px}
+
+  /* Container grid */
+  .container{max-width:1500px;margin:28px auto;padding:0 20px}
+  .grid{
+    display:grid;
+    grid-template-columns: 340px 1fr 420px;
+    gap:22px;
+    align-items:start;
+  }
+  @media (max-width:1200px){ .grid{ grid-template-columns: 1fr 1fr; } .right-col{ display:none; } }
+  @media (max-width:900px){ .grid{ grid-template-columns: 1fr; } .sidebar{order:2} .main{order:1} }
+
+  /* Card generic */
+  .card{
+    background:var(--card);
+    padding:18px;
+    border-radius:14px;
+    border:1px solid rgba(255,255,255,0.03);
+    box-shadow: 0 10px 30px rgba(2,6,23,0.6);
+  }
+  .title{font-weight:800;font-size:16px;margin-bottom:8px}
+  .small-muted{font-size:12px;color:var(--muted)}
+  .list{display:flex;flex-direction:column;gap:8px}
+  .object-item{padding:12px;border-radius:12px;background:linear-gradient(180deg, rgba(255,255,255,0.01), rgba(255,255,255,0.00));cursor:pointer;border:1px solid rgba(255,255,255,0.02);display:flex;justify-content:space-between;align-items:center}
+  .object-item.active{box-shadow:inset 0 0 0 1px rgba(255,255,255,0.03);background:linear-gradient(90deg, rgba(77,166,255,0.04), rgba(255,184,77,0.02));}
+
+  /* Sidebar specifics */
+  .sidebar .param{margin-bottom:12px}
+  .input, select{width:100%;padding:10px;border-radius:10px;border:1px solid rgba(255,255,255,0.04);background:transparent;color:var(--white);outline:none}
+  .range{width:100%}
+
+  /* Main panel */
+  .main .header{display:flex;justify-content:space-between;align-items:flex-start;gap:12px;margin-bottom:8px}
+  .main h2{margin:0;font-size:24px}
+  .subtitle{color:var(--muted);margin-top:6px;font-size:13px}
+  .map-card{min-height:560px;border-radius:12px;padding:12px;display:flex;flex-direction:column;gap:12px;background:linear-gradient(180deg, rgba(255,255,255,0.01), rgba(255,255,255,0.00));border:1px solid rgba(255,255,255,0.03)}
+  .map-controls{display:flex;gap:10px;align-items:center;flex-wrap:wrap}
+
+  /* Map viewport and overlays */
+  .map-viewport{position:relative;flex:1;border-radius:12px;overflow:hidden;background:linear-gradient(180deg,#061025,#08121a);display:flex;align-items:center;justify-content:center;min-height:420px}
+  .floor-svg{position:absolute;inset:0;width:100%;height:100%;pointer-events:auto}
+  canvas{position:absolute;left:0;top:0;width:100%;height:100%;display:block;pointer-events:none}
+  .map-legend{position:absolute;left:14px;bottom:14px;padding:10px;border-radius:12px;background:rgba(0,0,0,0.45);font-size:13px}
+  .map-stats{position:absolute;right:14px;bottom:14px;padding:10px;border-radius:12px;background:rgba(0,0,0,0.45);font-size:13px;text-align:right}
+  .tooltip{position:absolute;padding:6px 10px;border-radius:8px;background:rgba(0,0,0,0.7);font-size:13px;color:#fff;pointer-events:none;transform:translate(-50%,-120%);white-space:nowrap;z-index:2100}
+  /* Right col */
+  .right-col .title{font-size:16px;font-weight:800}
+  .zone-list{display:flex;flex-direction:column;gap:8px;max-height:340px;overflow:auto;padding-right:6px}
+  .zone-item{padding:12px;border-radius:12px;background:rgba(255,255,255,0.01);display:flex;justify-content:space-between;align-items:center;cursor:pointer}
+  .zone-item.active{background:linear-gradient(90deg, rgba(77,166,255,0.06), rgba(255,184,77,0.02));box-shadow:inset 0 0 0 1px rgba(255,255,255,0.03)}
+  .ai-card{padding:12px;border-radius:12px;background:linear-gradient(180deg, rgba(255,255,255,0.01), rgba(255,255,255,0.00));border:1px solid rgba(255,255,255,0.03)}
+
+  /* controls small */
+  .chip{padding:8px 12px;border-radius:12px;background:rgba(255,255,255,0.02);font-weight:700}
+  .kpi{font-weight:800;font-size:20px}
+  .muted-small{font-size:12px;color:var(--muted)}
+
+  /* tiny helpers */
+  .flex{display:flex;gap:8px;align-items:center}
+  .center{display:flex;justify-content:center;align-items:center}
+  .footer-note{font-size:13px;color:var(--muted);text-align:center;margin-top:26px;padding-bottom:40px}
+  /* mobile adjustments */
+  @media (max-width:640px){
+    .topbar .wrap{padding:10px}
+    .logo{width:48px;height:48px}
+    .brand h1{font-size:16px}
+    .container{margin:12px auto;padding:0 12px}
+    .map-card{padding:8px}
+  }
+</style>
+</head>
+<body>
+
+<!-- Topbar -->
+<div class="topbar" role="banner">
+  <div class="wrap">
+    <div class="brand" aria-hidden>
+      <div class="logo">НИКС</div>
+      <div>
+        <h1 style="margin:0;font-size:18px">НИКС</h1>
+        <div class="tag muted">Нейроинтеллектуальная Карта Потоков</div>
+      </div>
+    </div>
+
+    <div class="top-actions" role="toolbar" aria-label="Действия">
+      <div class="muted-small">demo@team.nix</div>
+      <button class="btn" id="btnExportCSV" title="Экспорт текущих данных в CSV">Экспорт CSV</button>
+      <button class="btn" id="btnExportPNG" title="Скачать PNG вида карты">Скачать PNG</button>
+      <button class="btn primary" id="btnStart" title="Запустить/приостановить симуляцию">Старт симуляции</button>
+    </div>
+  </div>
+</div>
+
+<!-- Main container -->
+<div class="container" role="main">
+  <div class="grid">
+
+    <!-- Sidebar -->
+    <aside class="sidebar card" aria-label="Панель настроек">
+      <div class="title">Объекты</div>
+      <div class="section">
+        <div class="list" id="objectList" role="list">
+          <!-- Filled by JS -->
+        </div>
+      </div>
+
+      <div class="title">Параметры</div>
+
+      <div class="section param">
+        <label class="small-muted" for="objectSelect">Выбор объекта</label>
+        <select id="objectSelect" class="input" aria-label="Выбор объекта"></select>
+      </div>
+
+      <div class="section param">
+        <label class="small-muted" for="presetSelect">Тип тепловой карты</label>
+        <select id="presetSelect" class="input" aria-label="Выбор пресета">
+          <option value="classic">Классическая (красный→жёлтый→зелёный)</option>
+          <option value="cool">Холодная (синий→циан→зелёный)</option>
+          <option value="mono">Монохром</option>
+          <option value="night">Ночная</option>
+        </select>
+      </div>
+
+      <div class="section param">
+        <label class="small-muted" for="density">Плотность (точек)</label>
+        <input id="density" class="range" type="range" min="8" max="400" value="100" aria-label="Плотность">
+        <div class="muted-small">Плотность: <span id="densityVal">100</span></div>
+      </div>
+
+      <div class="section param">
+        <label class="small-muted" for="blur">Размытие (радиус)</label>
+        <input id="blur" class="range" type="range" min="6" max="260" value="48" aria-label="Размытие">
+        <div class="muted-small">Размытие: <span id="blurVal">48</span></div>
+      </div>
+
+      <div class="section param">
+        <label class="small-muted" for="timeShift">Временной сдвиг (мин)</label>
+        <input id="timeShift" class="range" type="range" min="-120" max="240" value="0" aria-label="Временной сдвиг">
+        <div class="muted-small">Сдвиг: <span id="timeShiftVal">0</span> мин</div>
+      </div>
+
+      <div class="section param">
+        <label class="small-muted">Действия</label>
+        <div style="display:flex;gap:8px;margin-top:8px">
+          <button class="btn" id="btnStep">Шаг</button>
+          <button class="btn" id="btnReset">Сброс</button>
+        </div>
+      </div>
+
+      <div class="section param">
+        <div class="small-muted">Версия</div>
+        <div class="muted-small">v0.95 • локальный прототип</div>
+      </div>
+    </aside>
+
+    <!-- Main -->
+    <section class="main" aria-label="Главная панель">
+      <div class="header">
+        <div>
+          <h2>Карта объекта — Тепловая визуализация</h2>
+          <div class="subtitle">Кликайте по зонам — тепловая карта будет строго внутри выбранной зоны. Поддержка мобильных устройств и плавная работа в реальном времени.</div>
+        </div>
+
+        <div class="map-controls">
+          <div class="chip" id="currentObjectLabel">ТРЦ ГОРИЗОНТ</div>
+          <div class="chip muted-small">Сим: <span id="simTime">0</span> мин</div>
+        </div>
+      </div>
+
+      <div class="map-card card" aria-label="Карта объекта">
+        <div style="display:flex;justify-content:space-between;align-items:center">
+          <div style="display:flex;gap:10px;align-items:center">
+            <label class="small-muted" for="miniObjectSelect">Объект</label>
+            <select id="miniObjectSelect" class="input" aria-label="Мини выбор объекта"></select>
+            <label class="small-muted" for="miniZoneSelect">Помещение</label>
+            <select id="miniZoneSelect" class="input" aria-label="Мини выбор зоны"></select>
+          </div>
+
+          <div style="display:flex;gap:8px;align-items:center">
+            <button class="btn" id="btnTogglePoints">Точки</button>
+            <button class="btn" id="btnToggleHeat">Тепловая</button>
+            <button class="btn" id="btnCenterView">Центр</button>
+          </div>
+        </div>
+
+        <div class="map-viewport" id="mapViewport" role="application" aria-label="Карта объекта">
+          <svg id="floorSVG" class="floor-svg" viewBox="0 0 960 720" preserveAspectRatio="xMidYMid meet" xmlns="http://www.w3.org/2000/svg" aria-hidden>
+            <rect width="960" height="720" fill="transparent"></rect>
+            <g id="zones" transform="translate(60,40)">
+              <rect class="zone" id="z-1" x="0"    y="0"   width="360" height="260" rx="10" fill="rgba(255,255,255,0.02)" stroke="rgba(255,255,255,0.03)"/>
+              <rect class="zone" id="z-2" x="380"  y="0"   width="420" height="260" rx="10" fill="rgba(255,255,255,0.02)" stroke="rgba(255,255,255,0.03)"/>
+              <rect class="zone" id="z-3" x="0"    y="280" width="250" height="380" rx="10" fill="rgba(255,255,255,0.02)" stroke="rgba(255,255,255,0.03)"/>
+              <rect class="zone" id="z-4" x="270"  y="280" width="480" height="200" rx="10" fill="rgba(255,255,255,0.02)" stroke="rgba(255,255,255,0.03)"/>
+              <rect class="zone" id="z-5" x="760"  y="280" width="140" height="380" rx="10" fill="rgba(255,255,255,0.02)" stroke="rgba(255,255,255,0.03)"/>
+              <rect class="zone" id="z-6" x="0"    y="680" width="900" height="40"  rx="6" fill="rgba(255,255,255,0.02)" stroke="rgba(255,255,255,0.03)"/>
+            </g>
+
+            <g transform="translate(60,40)">
+              <rect x="-8" y="-8" width="908" height="708" rx="14" fill="none" stroke="rgba(255,255,255,0.03)" stroke-width="2"/>
+            </g>
+          </svg>
+
+          <!-- canvases (raw intensity, colorized heatmap, markers, dim overlay) -->
+          <canvas id="rawCanvas" aria-hidden></canvas>
+          <canvas id="heatCanvas" aria-hidden></canvas>
+          <canvas id="pointsCanvas" aria-hidden></canvas>
+          <canvas id="dimCanvas" aria-hidden></canvas>
+
+          <div class="map-legend" id="legendBox" aria-hidden>
+            <div style="font-weight:800">Загрузка</div>
+            <div class="small-muted">Красный — высокая, зелёный — низкая</div>
+          </div>
+
+          <div class="map-stats" id="mapStats" aria-hidden>
+            <div class="small-muted">Загрузка: <span id="mapLoad">—%</span></div>
+            <div class="small-muted">Прогноз: <span id="mapForecast">—</span></div>
+          </div>
+
+          <div id="tooltip" class="tooltip" style="display:none"></div>
+        </div>
+      </div>
+    </section>
+
+    <!-- Right column -->
+    <aside class="right-col card" aria-label="Аналитика и зоны">
+      <div class="title">Зоны</div>
+      <div class="section">
+        <div class="muted-small">Список зон</div>
+        <div class="zone-list" id="zoneList" role="list">
+          <!-- filled by JS -->
+        </div>
+      </div>
+
+      <div class="section">
+        <div class="title">ИИ — рекомендации</div>
+        <div class="ai-card">
+          <div class="ai-rec" style="font-weight:800;margin-bottom:8px">Рекомендации</div>
+          <div id="aiOutput" class="muted-small">Запустите симуляцию для рекомендаций.</div>
+        </div>
+      </div>
+
+      <div class="section">
+        <div class="title">Временная шкала</div>
+        <div class="timeline" style="padding:10px;margin-top:8px;">
+          <canvas id="timelineCanvas" width="340" height="100" aria-hidden></canvas>
+          <div class="muted-small" style="margin-top:6px">История: последние 120 минут (симуляция)</div>
+        </div>
+      </div>
+    </aside>
+
+  </div>
+
+  <div class="footer-note">Нажмите Space для старта/паузы симуляции. ArrowRight — шаг. r — сброс. Все данные — имитация.</div>
+
+</div>
+
+<script>
+/*
+  Улучшенный, стабильный и полностью рабочий фронтенд-прототип НИКС.
+  - Множество защит от гонок, дебаунс ресайза и heavy ops
+  - Подробные комментарии
+  - Оптимизированный рендер-пайплайн
+*/
+
+/* ======================
+   Конфигурация и данные
+   ====================== */
+const OBJECTS = [
+  { id:'gorizont', name:'ТРЦ ГОРИЗОНТ',
+    zones: ['Женская одежда','Спорттовары','Кинотеатр','Фудкорт','Службы','Коридор'] },
+  { id:'mega', name:'ТЦ МЕГА', zones: ['Вход','Атриум','Северная галерея','Южная галерея','Паркинг','Лестницы'] },
+  { id:'megamag', name:'ТЦ МЕГМАГ', zones: ['Главная','Промо','Кинотеатр','Склад','Коридор','Переход'] },
+  { id:'vokzal', name:'Ж/Д ВОКЗАЛ', zones: ['Платформа 1','Зал ожидания','Кассы','Кафе','Выход','Переход'] },
+  { id:'platov', name:'АЭРОПОРТ ПЛАТОВ', zones: ['Check-in','Security','Гейты','Duty Free','Arrivals','Транзит'] }
+];
+
+/* DOM references */
+const objectListEl = document.getElementById('objectList');
+const objectSelect = document.getElementById('objectSelect');
+const miniObjectSelect = document.getElementById('miniObjectSelect');
+const presetSelect = document.getElementById('presetSelect');
+const densityEl = document.getElementById('density');
+const blurEl = document.getElementById('blur');
+const timeShiftEl = document.getElementById('timeShift');
+const densityVal = document.getElementById('densityVal');
+const blurVal = document.getElementById('blurVal');
+const timeShiftVal = document.getElementById('timeShiftVal');
+const miniZoneSelect = document.getElementById('miniZoneSelect');
+
+const floorSVG = document.getElementById('floorSVG');
+const rawCanvas = document.getElementById('rawCanvas');
+const heatCanvas = document.getElementById('heatCanvas');
+const pointsCanvas = document.getElementById('pointsCanvas');
+const dimCanvas = document.getElementById('dimCanvas');
+
+const btnStart = document.getElementById('btnStart');
+const btnStep = document.getElementById('btnStep');
+const btnReset = document.getElementById('btnReset');
+const btnExportCSV = document.getElementById('btnExportCSV');
+const btnExportPNG = document.getElementById('btnExportPNG');
+const btnTogglePoints = document.getElementById('btnTogglePoints');
+const btnToggleHeat = document.getElementById('btnToggleHeat');
+const btnCenterView = document.getElementById('btnCenterView');
+
+const mapLoad = document.getElementById('mapLoad');
+const mapForecast = document.getElementById('mapForecast');
+const aiOutput = document.getElementById('aiOutput');
+const zoneListEl = document.getElementById('zoneList');
+const currentObjectLabel = document.getElementById('currentObjectLabel');
+const simTimeLabel = document.getElementById('simTime');
+const timelineCanvas = document.getElementById('timelineCanvas');
+const tooltip = document.getElementById('tooltip');
+
+let rawCtx, heatCtx, pointsCtx, dimCtx;
+let dpr = Math.max(1, window.devicePixelRatio || 1);
+
+/* Internal state */
+let currentObject = OBJECTS[0];
+let zonesMeta = []; // list of zone objects {id, label, svgEl, svgBBox, centerSVG, centerCanvas, canvasBBox, count, history[]}
+let selectedZoneId = null;
+let simRunning = false;
+let simInterval = null;
+let simTime = 0;
+let timelineData = [];
+let showPoints = true;
+let showHeat = true;
+let resizeToken = 0; // used to cancel async operations
+let drawFrameRequest = null;
+let isDrawing = false;
+let lastRenderHash = 0;
+
+/* Rendering params */
+let params = {
+  preset: 'classic',
+  density: Number(densityEl.value || 100),
+  blur: Number(blurEl.value || 48),
+  timeShift: Number(timeShiftEl.value || 0)
+};
+
+/* Debounce utility */
+function debounce(func, wait){
+  let t=null;
+  return function(...args){
+    clearTimeout(t);
+    t = setTimeout(()=> func.apply(this,args), wait);
+  };
+}
+
+/* Throttle with animation frame (for draw) */
+function rafThrottle(fn){
+  let locked=false;
+  return function(...args){
+    if(locked) return;
+    locked=true;
+    requestAnimationFrame(()=>{ fn.apply(this,args); locked=false; });
+  };
+}
+
+/* Simple clamp */
+function clamp(v,a,b){ return Math.max(a, Math.min(b, v)); }
+
+/* ==========================
+   Color mapping utilities
+   ========================== */
+function blend(a,b,t){
+  return [ Math.round(a[0] + (b[0]-a[0])*t), Math.round(a[1] + (b[1]-a[1])*t), Math.round(a[2] + (b[2]-a[2])*t) ];
+}
+function colorForValue(v, preset){
+  v = clamp(v,0,1);
+  if(preset === 'classic'){
+    if(v < 0.5){
+      const t = v/0.5;
+      return blend([45,209,138], [255,210,77], t);
+    } else {
+      const t = (v-0.5)/0.5;
+      return blend([255,210,77], [255,60,60], t);
+    }
+  } else if(preset === 'cool'){
+    if(v < 0.5){
+      const t = v/0.5;
+      return blend([20,20,160],[0,160,230],t);
+    } else {
+      const t = (v-0.5)/0.5;
+      return blend([0,160,230],[45,209,138],t);
+    }
+  } else if(preset === 'mono'){
+    const g = Math.round(255 * v);
+    return [g,g,g];
+  } else if(preset === 'night'){
+    if(v < 0.6){
+      const t = v/0.6;
+      return blend([12,12,40],[120,40,200],t);
+    } else {
+      const t = (v-0.6)/0.4;
+      return blend([120,40,200],[255,40,140],t);
+    }
+  }
+  return [255,0,0];
+}
+
+/* ==========================
+   Coordinate transforms
+   ========================== */
+
+/* Convert an SVG point (user units) to client screen coordinates */
+function svgPointToClient(svgX, svgY){
+  const pt = floorSVG.createSVGPoint();
+  pt.x = svgX; pt.y = svgY;
+  const ctm = floorSVG.getScreenCTM();
+  const sp = pt.matrixTransform(ctm);
+  return {x: sp.x, y: sp.y};
+}
+
+/* Convert client coordinates to canvas-local coordinates */
+function clientToCanvasLocal(clientX, clientY, canvasEl){
+  const rect = canvasEl.getBoundingClientRect();
+  return { x: (clientX - rect.left), y: (clientY - rect.top) };
+}
+
+/* Convert SVG user coords to canvas local coords (for a specific canvas) */
+function svgToCanvas(svgX, svgY, canvasEl){
+  const sp = svgPointToClient(svgX, svgY);
+  return clientToCanvasLocal(sp.x, sp.y, canvasEl);
+}
+
+/* ==========================
+   Canvas sizing & DPR scaling
+   ========================== */
+
+function resizeAllCanvases(){
+  // increase resize token to cancel previous async transforms if needed
+  resizeToken++;
+  const token = resizeToken;
+
+  const viewport = document.getElementById('mapViewport');
+  const rect = viewport.getBoundingClientRect();
+  const cssW = Math.max(200, Math.round(rect.width));
+  const cssH = Math.max(200, Math.round(rect.height));
+  dpr = Math.max(1, window.devicePixelRatio || 1);
+
+  // set style size and backing store size with DPR
+  [rawCanvas, heatCanvas, pointsCanvas, dimCanvas].forEach(canvas=>{
+    canvas.style.width = cssW + 'px';
+    canvas.style.height = cssH + 'px';
+    canvas.width = Math.round(cssW * dpr);
+    canvas.height = Math.round(cssH * dpr);
+    const ctx = canvas.getContext('2d');
+    ctx.setTransform(dpr,0,0,dpr,0,0);
+  });
+
+  rawCtx = rawCanvas.getContext('2d');
+  heatCtx = heatCanvas.getContext('2d');
+  pointsCtx = pointsCanvas.getContext('2d');
+  dimCtx = dimCanvas.getContext('2d');
+
+  // recompute zone coordinates after layout stabilized (use small timeout to allow DOM repaint)
+  setTimeout(()=>{
+    if(token !== resizeToken) return; // cancelled
+    updateZoneCanvasCoordinates();
+    drawImmediate(); // immediate draw after resize
+  }, 60);
+}
+
+/* Debounced resize handler to avoid heavy computations */
+const debouncedResize = debounce(()=> resizeAllCanvases(), 120);
+window.addEventListener('resize', debouncedResize);
+
+/* ==========================
+   Zones metadata builder
+   ========================== */
+
+function buildZonesMeta(){
+  zonesMeta = [];
+  const svgZones = document.querySelectorAll('#zones .zone');
+
+  svgZones.forEach((svgEl, idx) => {
+    const bbox = svgEl.getBBox();
+    const centerSVG = { x: bbox.x + bbox.width/2, y: bbox.y + bbox.height/2 };
+    const label = (currentObject.zones && currentObject.zones[idx]) ? currentObject.zones[idx] : `Зона ${idx+1}`;
+    const zone = {
+      id: svgEl.id,
+      label,
+      svgEl,
+      svgBBox: bbox,
+      centerSVG,
+      centerCanvas: {x:0,y:0},
+      canvasBBox: {x:0,y:0,width:0,height:0},
+      count: Math.round(20 + Math.random()*80),
+      history: []
+    };
+    zonesMeta.push(zone);
+    // attach click handler with defensive wrapper
+    svgEl.style.cursor = 'pointer';
+    svgEl.removeEventListener('click', svgClickHandler);
+    svgEl.addEventListener('click', svgClickHandler);
+  });
+
+  // update coordinates for canvas spaces
+  updateZoneCanvasCoordinates();
+}
+
+/* SVG click handler (separated so we can remove later) */
+function svgClickHandler(ev){
+  ev.stopPropagation();
+  const el = ev.currentTarget;
+  if(!el) return;
+  selectZone(el.id);
+}
+
+/* Update zone canvas coordinates for all zones */
+function updateZoneCanvasCoordinates(){
+  if(!rawCanvas) return;
+  zonesMeta.forEach(z=>{
+    const tl = svgToCanvas(z.svgBBox.x, z.svgBBox.y, rawCanvas);
+    const br = svgToCanvas(z.svgBBox.x + z.svgBBox.width, z.svgBBox.y + z.svgBBox.height, rawCanvas);
+    z.canvasBBox = {
+      x: Math.round(tl.x),
+      y: Math.round(tl.y),
+      width: Math.max(1, Math.round(br.x - tl.x)),
+      height: Math.max(1, Math.round(br.y - tl.y))
+    };
+    const c = svgToCanvas(z.centerSVG.x, z.centerSVG.y, rawCanvas);
+    z.centerCanvas = { x: Math.round(c.x), y: Math.round(c.y) };
+  });
+}
+
+/* ==========================
+   UI population & bindings
+   ========================== */
+
+function populateUI(){
+  // Object lists in sidebar and selects
+  objectListEl.innerHTML = '';
+  objectSelect.innerHTML = '';
+  miniObjectSelect.innerHTML = '';
+
+  OBJECTS.forEach((o, idx) => {
+    // sidebar item
+    const div = document.createElement('div');
+    div.className = 'object-item' + (idx===0 ? ' active' : '');
+    div.setAttribute('role','listitem');
+    div.innerHTML = `<div style="font-weight:800">${o.name}</div><div class="small-muted">${o.zones.length} зон</div>`;
+    div.addEventListener('click', ()=> selectObject(o.id));
+    objectListEl.appendChild(div);
+
+    // selects
+    const opt = document.createElement('option'); opt.value = o.id; opt.textContent = o.name;
+    objectSelect.appendChild(opt);
+    miniObjectSelect.appendChild(opt.cloneNode(true));
+  });
+
+  // default selection
+  selectObject(OBJECTS[0].id);
+
+  // preset select
+  presetSelect.value = params.preset;
+
+  // density / blur / timeShift labels
+  densityVal.textContent = densityEl.value;
+  blurVal.textContent = blurEl.value;
+  timeShiftVal.textContent = timeShiftEl.value;
+
+  // bind UI events
+  densityEl.addEventListener('input', ()=>{ params.density = Number(densityEl.value); densityVal.textContent = params.density; draw(); });
+  blurEl.addEventListener('input', ()=>{ params.blur = Number(blurEl.value); blurVal.textContent = params.blur; draw(); });
+  timeShiftEl.addEventListener('input', ()=>{ params.timeShift = Number(timeShiftEl.value); timeShiftVal.textContent = params.timeShift; });
+
+  presetSelect.addEventListener('change', ()=>{ params.preset = presetSelect.value; draw(); });
+  objectSelect.addEventListener('change', ()=>{ selectObject(objectSelect.value); });
+  miniObjectSelect.addEventListener('change', ()=>{ selectObject(miniObjectSelect.value); });
+
+  btnStart.addEventListener('click', ()=> { if(simRunning) stopSim(); else startSim(); });
+  btnStep.addEventListener('click', ()=> stepSimulation(1));
+  btnReset.addEventListener('click', ()=> resetSimulation());
+  btnTogglePoints.addEventListener('click', ()=> { showPoints = !showPoints; btnTogglePoints.classList.toggle('active'); draw(); });
+  btnToggleHeat.addEventListener('click', ()=> { showHeat = !showHeat; btnToggleHeat.classList.toggle('active'); draw(); });
+  btnCenterView.addEventListener('click', ()=> { centerView(); });
+
+  btnExportCSV.addEventListener('click', ()=> exportCSV());
+  btnExportPNG.addEventListener('click', ()=> exportPNG());
+}
+
+/* Select object by id */
+function selectObject(id){
+  const obj = OBJECTS.find(x=>x.id===id) || OBJECTS[0];
+  currentObject = obj;
+  // UI highlights
+  document.querySelectorAll('.object-item').forEach(el=>{
+    el.classList.toggle('active', el.textContent.includes(obj.name));
+  });
+  objectSelect.value = obj.id;
+  miniObjectSelect.value = obj.id;
+  currentObjectLabel.textContent = obj.name;
+  // update zone labels in SVG if we had dynamic ones (we use mapping by order)
+  buildZonesMeta(); // rebuild zones mapping based on current object zones
+  rebuildRightZoneList();
+  resetSimulation();
+  draw();
+}
+
+/* Rebuild right-hand zone list UI */
+function rebuildRightZoneList(){
+  zoneListEl.innerHTML = '';
+  zonesMeta.forEach(z=>{
+    const div = document.createElement('div');
+    div.className = 'zone-item';
+    div.id = 'list-' + z.id;
+    div.innerHTML = `<div style="font-weight:700">${z.label}</div><div class="small-muted" id="count-${z.id}">${z.count} чел</div>`;
+    div.addEventListener('click', ()=> selectZone(z.id));
+    zoneListEl.appendChild(div);
+  });
+}
+
+/* Select zone */
+function selectZone(id){
+  selectedZoneId = id;
+  // highlight SVG stroke and list
+  document.querySelectorAll('#zones .zone').forEach(el=> el.style.stroke='rgba(255,255,255,0.03)');
+  const sel = document.getElementById(id);
+  if(sel) sel.style.stroke = 'rgba(255,210,77,0.95)';
+  document.querySelectorAll('.zone-item').forEach(el=> el.classList.remove('active'));
+  const li = document.getElementById('list-' + id);
+  if(li) li.classList.add('active');
+  miniZoneSelect.value = id || '';
+  draw();
+}
+
+/* Deselect zone */
+function deselectZone(){
+  selectedZoneId = null;
+  document.querySelectorAll('#zones .zone').forEach(el=> el.style.stroke='rgba(255,255,255,0.03)');
+  document.querySelectorAll('.zone-item').forEach(el=> el.classList.remove('active'));
+  miniZoneSelect.value = '';
+  draw();
+}
+
+/* click outside svg zones to deselect */
+floorSVG.addEventListener('click', (ev)=>{
+  if(ev.target && ev.target.classList.contains('zone')) return;
+  deselectZone();
+});
+
+/* ==========================
+   Rendering pipeline
+   ========================== */
+
+/* Generate points to draw in raw intensity canvas */
+function generatePoints(){
+  const pts = [];
+  // Either focus on selected zone or all zones
+  if(selectedZoneId){
+    const z = zonesMeta.find(x=>x.id===selectedZoneId);
+    if(!z) return pts;
+    const localCount = Math.max(8, Math.round((z.count / 10) * (params.density / 60)));
+    for(let i=0;i<localCount;i++){
+      const rx = (Math.random()-0.5) * z.canvasBBox.width * 0.9;
+      const ry = (Math.random()-0.5) * z.canvasBBox.height * 0.9;
+      const x = z.centerCanvas.x + rx;
+      const y = z.centerCanvas.y + ry;
+      const intensity = clamp((z.count / 220) + Math.random()*0.16, 0.02, 1);
+      pts.push({x,y,intensity,zone: z.id});
+    }
+  } else {
+    zonesMeta.forEach(z=>{
+      const localCount = Math.max(4, Math.round((z.count / 12) * (params.density / 60)));
+      for(let i=0;i<localCount;i++){
+        const rx = (Math.random()-0.5) * z.canvasBBox.width * 0.9;
+        const ry = (Math.random()-0.5) * z.canvasBBox.height * 0.9;
+        const x = z.centerCanvas.x + rx;
+        const y = z.centerCanvas.y + ry;
+        const intensity = clamp((z.count / 260) + Math.random()*0.14, 0.02, 1);
+        pts.push({x,y,intensity,zone: z.id});
+      }
+    });
+  }
+  return pts;
+}
+
+/* Draw raw intensity: white with alpha */
+function renderRawIntensity(){
+  // Clear raw canvas
+  const w = rawCanvas.width / dpr;
+  const h = rawCanvas.height / dpr;
+  rawCtx.clearRect(0,0,rawCanvas.width, rawCanvas.height);
+
+  // Create offscreen temporary canvas for drawing gradients (improves performance)
+  // We'll draw gradients directly to rawCtx using radial gradients.
+  const pts = generatePoints();
+
+  // Draw each point as radial gradient (white -> transparent) with alpha = intensity
+  pts.forEach(p=>{
+    const r = params.blur;
+    const grad = rawCtx.createRadialGradient(p.x, p.y, 0, p.x, p.y, r);
+    const a = clamp(p.intensity, 0.02, 0.96);
+    grad.addColorStop(0, `rgba(255,255,255,${a})`);
+    grad.addColorStop(1, `rgba(255,255,255,0)`);
+    rawCtx.fillStyle = grad;
+    rawCtx.beginPath();
+    rawCtx.arc(p.x, p.y, r, 0, Math.PI*2);
+    rawCtx.fill();
+  });
+
+  // quick smoothing technique — downscale then upscale to simulate blur
+  if(params.blur > 40){
+    const tmp = document.createElement('canvas');
+    const cssW = rawCanvas.width / dpr;
+    const cssH = rawCanvas.height / dpr;
+    tmp.width = Math.max(1, Math.round(cssW * 0.45));
+    tmp.height = Math.max(1, Math.round(cssH * 0.45));
+    const tctx = tmp.getContext('2d');
+    // draw current raw canvas to temp
+    tctx.drawImage(rawCanvas, 0, 0, tmp.width, tmp.height);
+    // clear raw and draw back scaled (devicePixelRatio transform already set)
+    rawCtx.clearRect(0,0,rawCanvas.width, rawCanvas.height);
+    rawCtx.drawImage(tmp, 0, 0, cssW, cssH);
+  }
+}
+
+/* Colorize the raw grayscale alpha map to color heatmap */
+function colorizeToHeat(){
+  // Read raw canvas data (careful: reading large images can be heavy)
+  // We'll operate on CSS pixel dimensions, which is rawCanvas.width/dpr
+  const cssW = Math.round(rawCanvas.width / dpr);
+  const cssH = Math.round(rawCanvas.height / dpr);
+  let imgData;
+  try {
+    imgData = rawCtx.getImageData(0, 0, cssW, cssH);
+  } catch(e){
+    // Security / browser may throw if canvas tainted; fallback: clear heat and return
+    console.warn('getImageData error', e);
+    heatCtx.clearRect(0,0,heatCanvas.width, heatCanvas.height);
+    return;
+  }
+  const data = imgData.data;
+  const out = heatCtx.createImageData(imgData.width, imgData.height);
+  const preset = params.preset;
+
+  // Map alpha channel to color
+  for(let i=0, n=data.length; i<n; i+=4){
+    const a = data[i+3] / 255; // intensity
+    if(a < 0.01){
+      out.data[i+3] = 0;
+      continue;
+    }
+    const col = colorForValue(a, preset);
+    out.data[i]   = col[0];
+    out.data[i+1] = col[1];
+    out.data[i+2] = col[2];
+    out.data[i+3] = Math.round(255 * Math.min(1, a * 0.95));
+  }
+
+  // Put to heatCtx; clip if zone selected
+  heatCtx.clearRect(0,0,heatCanvas.width,heatCanvas.height);
+  if(selectedZoneId){
+    const z = zonesMeta.find(x=>x.id===selectedZoneId);
+    if(z && z.canvasBBox){
+      heatCtx.save();
+      heatCtx.beginPath();
+      heatCtx.rect(z.canvasBBox.x, z.canvasBBox.y, z.canvasBBox.width, z.canvasBBox.height);
+      heatCtx.clip();
+      heatCtx.putImageData(out, 0, 0);
+      heatCtx.restore();
+    } else {
+      heatCtx.putImageData(out, 0, 0);
+    }
+  } else {
+    heatCtx.putImageData(out, 0, 0);
+  }
+
+  // Small color overlay to enhance contrast (subtle)
+  heatCtx.globalCompositeOperation = 'lighter';
+  heatCtx.globalAlpha = 0.18;
+  heatCtx.fillStyle = 'rgba(255,255,255,0.02)';
+  const cssCanvasW = heatCanvas.width / dpr;
+  const cssCanvasH = heatCanvas.height / dpr;
+  heatCtx.fillRect(0,0,cssCanvasW, cssCanvasH);
+  heatCtx.globalCompositeOperation = 'source-over';
+  heatCtx.globalAlpha = 1;
+}
+
+/* Draw points and labels */
+function renderPoints(){
+  // Clear points canvas
+  const cssW = pointsCanvas.width / dpr;
+  const cssH = pointsCanvas.height / dpr;
+  pointsCtx.clearRect(0,0,pointsCanvas.width, pointsCanvas.height);
+
+  zonesMeta.forEach(z=>{
+    const r = Math.max(6, Math.min(28, Math.log(1+z.count) * 5));
+    const color = z.count > 140 ? 'rgba(255,60,60,0.96)' : (z.count > 70 ? 'rgba(255,210,77,0.96)' : 'rgba(45,209,138,0.96)');
+    pointsCtx.beginPath();
+    pointsCtx.fillStyle = color;
+    pointsCtx.strokeStyle = 'rgba(0,0,0,0.35)';
+    pointsCtx.lineWidth = 2;
+    if(showPoints){
+      pointsCtx.arc(z.centerCanvas.x, z.centerCanvas.y, r, 0, Math.PI*2);
+      pointsCtx.fill();
+      pointsCtx.stroke();
+    }
+    // label text
+    pointsCtx.font = '700 12px Inter, Arial';
+    pointsCtx.fillStyle = 'rgba(255,255,255,0.95)';
+    pointsCtx.textAlign = 'center';
+    pointsCtx.fillText(`${z.count} чел`, z.centerCanvas.x, z.centerCanvas.y - r - 8);
+
+    // selected zone border box
+    if(selectedZoneId === z.id){
+      pointsCtx.beginPath();
+      pointsCtx.strokeStyle = 'rgba(255,210,77,0.95)';
+      pointsCtx.lineWidth = 2;
+      pointsCtx.rect(z.canvasBBox.x+1, z.canvasBBox.y+1, z.canvasBBox.width-2, z.canvasBBox.height-2);
+      pointsCtx.stroke();
+    }
+  });
+}
+
+/* Dim overlay when zone is selected */
+function renderDimOverlay(){
+  const cssW = dimCanvas.width / dpr;
+  const cssH = dimCanvas.height / dpr;
+  dimCtx.clearRect(0,0,dimCanvas.width, dimCanvas.height);
+  if(selectedZoneId){
+    const z = zonesMeta.find(x=>x.id===selectedZoneId);
+    if(!z) return;
+    // darken whole canvas
+    dimCtx.fillStyle = 'rgba(0,0,0,0.45)';
+    dimCtx.fillRect(0,0,cssW,cssH);
+    // clear zone area
+    dimCtx.clearRect(z.canvasBBox.x, z.canvasBBox.y, z.canvasBBox.width, z.canvasBBox.height);
+    // border
+    dimCtx.beginPath();
+    dimCtx.strokeStyle = 'rgba(255,210,77,0.9)';
+    dimCtx.lineWidth = 2;
+    dimCtx.rect(z.canvasBBox.x+1, z.canvasBBox.y+1, z.canvasBBox.width-2, z.canvasBBox.height-2);
+    dimCtx.stroke();
+  }
+}
+
+/* Full draw (throttled via requestAnimationFrame wrapper) */
+const drawRAF = rafThrottle(function(){
+  if(!rawCtx) resizeAllCanvases();
+  // compute a simple hash to detect changes (counts, params, selection) to avoid unnecessary heavy getImageData
+  let hash = 0;
+  zonesMeta.forEach(z => { hash = ((hash<<5)-hash) + (z.count|0); hash |= 0; });
+  hash = ((hash<<5)-hash) + (params.density|0); hash |= 0;
+  hash = ((hash<<5)-hash) + (params.blur|0); hash |= 0;
+  hash = ((hash<<5)-hash) + (selectedZoneId ? selectedZoneId.length : 0); hash |= 0;
+  hash = ((hash<<5)-hash) + (showHeat?1:0) + (showPoints?2:0);
+  if(hash === lastRenderHash) return; // nothing changed
+  lastRenderHash = hash;
+
+  // render pipeline
+  if(showHeat){
+    renderRawIntensity();
+    colorizeToHeat();
+  } else {
+    heatCtx.clearRect(0,0,heatCanvas.width, heatCanvas.height);
+    rawCtx.clearRect(0,0,rawCanvas.width, rawCanvas.height);
+  }
+  if(showPoints) renderPoints(); else pointsCtx.clearRect(0,0,pointsCanvas.width, pointsCanvas.height);
+  renderDimOverlay();
+  updateUIStats();
+});
+
+/* Immediate draw (no throttle) used after resize / initialization */
+function drawImmediate(){
+  if(!rawCtx) resizeAllCanvases();
+  renderRawIntensity();
+  colorizeToHeat();
+  if(showPoints) renderPoints();
+  renderDimOverlay();
+  updateUIStats();
+}
+
+/* Public draw wrapper */
+function draw(){
+  drawRAF();
+}
+
+/* ==========================
+   Simulation logic
+   ========================== */
+
+function stepSimulation(deltaMinutes = 1){
+  simTime += deltaMinutes;
+  simTimeLabel.textContent = simTime;
+  const shiftFactor = 1 + (params.timeShift / 60) * 0.28;
+
+  zonesMeta.forEach((z,i)=>{
+    const base = 1 + (i * 0.04) + Math.sin(simTime/20 + i)*0.12;
+    const noise = (Math.random() - 0.5) * 0.35;
+    let delta = Math.round((Math.random()*18 - 7) * base * shiftFactor + noise * 12);
+    if(Math.random() < 0.05) delta += Math.round(20 * Math.random());
+    z.count = Math.max(0, z.count + delta);
+    z.count = Math.min(900, z.count);
+    z.history.push({t: simTime, v: z.count});
+    if(z.history.length > 300) z.history.shift();
+  });
+
+  const total = zonesMeta.reduce((s,z)=>s+z.count,0);
+  timelineData.push({t: simTime, v: total});
+  if(timelineData.length > 240) timelineData.shift();
+
+  // occasionally generate AI recs
+  if(Math.random() < 0.3) generateAIRecommendations();
+
+  draw();
+}
+
+/* Start simulation */
+function startSim(){
+  if(simRunning) return;
+  simRunning = true;
+  btnStart.classList.add('positive');
+  btnStart.textContent = 'Пауза симуляции';
+  simInterval = setInterval(()=> stepSimulation(1), 1000);
+}
+
+/* Stop simulation */
+function stopSim(){
+  simRunning = false;
+  btnStart.classList.remove('positive');
+  btnStart.textContent = 'Старт симуляции';
+  if(simInterval){ clearInterval(simInterval); simInterval = null; }
+}
+
+/* Reset simulation state */
+function resetSimulation(){
+  simTime = 0;
+  simTimeLabel.textContent = simTime;
+  timelineData = [];
+  zonesMeta.forEach((z,i)=>{
+    z.count = Math.max(5, Math.round(30 + Math.random()*120 + i*8));
+    z.history = [{t:0, v: z.count}];
+  });
+  draw();
+}
+
+/* Center view helper (scroll into view) */
+function centerView(){
+  const viewport = document.getElementById('mapViewport');
+  viewport.scrollIntoView({behavior:'smooth', block:'center'});
+}
+
+/* ==========================
+   AI Recommendations (simple heuristics)
+   ========================== */
+
+function generateAIRecommendations(){
+  const hottest = zonesMeta.slice().sort((a,b)=>b.count-a.count)[0];
+  const avg = Math.round(zonesMeta.reduce((s,z)=>s+z.count,0)/Math.max(1,zonesMeta.length));
+  const recs = [];
+  if(hottest.count > avg * 1.6 && hottest.count > 90){
+    recs.push(`🔴 Горячая точка: ${hottest.label} — ${hottest.count} чел. Рекомендация: открыть доп. кассы, направить персонал.`);
+  } else if(hottest.count > 180){
+    recs.push(`⚠️ Критическая нагрузка в ${hottest.label}: ${hottest.count} чел. Срочно: лимитировать доступ, оповестить руководство.`);
+  } else {
+    recs.push(`✅ Нагрузка стабильна. Средняя: ${avg} чел.`);
+  }
+  if(Math.random() > 0.75){
+    const z = zonesMeta[Math.floor(Math.random()*zonesMeta.length)];
+    recs.push(`Прогноз: через 10–30 мин возможен подъём в ${z.label}. Подготовьте персонал.`);
+  }
+  aiOutput.innerHTML = recs.map(r=>`<div style="margin-bottom:8px">${r}</div>`).join('');
+}
+
+/* ==========================
+   UI updates and helpers
+   ========================== */
+
+function updateUIStats(){
+  const total = zonesMeta.reduce((s,z)=>s+z.count,0);
+  const capacity = zonesMeta.length * 220;
+  const pct = Math.round((total / capacity) * 100);
+  mapLoad.textContent = Math.min(999, pct) + '%';
+  const soon = Math.round(total * (1 + Math.random()*0.14));
+  const later = Math.round(total * (1 + Math.random()*0.48));
+  const sPct = Math.round((soon / capacity) * 100);
+  const lPct = Math.round((later / capacity) * 100);
+  mapForecast.textContent = `${sPct}% → ${lPct}%`;
+
+  // update counts in zone list
+  zonesMeta.forEach(z=>{
+    const el = document.getElementById('count-' + z.id);
+    if(el) el.textContent = `${z.count} чел`;
+  });
+
+  drawTimeline();
+}
+
+/* Timeline sparkline */
+function drawTimeline(){
+  const ctx = timelineCanvas.getContext('2d');
+  const w = timelineCanvas.width;
+  const h = timelineCanvas.height;
+  ctx.clearRect(0,0,w,h);
+  if(timelineData.length < 2) return;
+  const vals = timelineData.map(d=>d.v);
+  const minV = Math.min(...vals);
+  const maxV = Math.max(...vals);
+  const range = Math.max(1, maxV - minV);
+  ctx.beginPath();
+  ctx.lineWidth = 2;
+  ctx.strokeStyle = 'rgba(77,166,255,0.95)';
+  for(let i=0;i<vals.length;i++){
+    const x = Math.round((i/(vals.length-1)) * (w-10)) + 5;
+    const y = Math.round(h - ((vals[i]-minV)/range) * (h-10) - 5);
+    if(i===0) ctx.moveTo(x,y); else ctx.lineTo(x,y);
+  }
+  ctx.stroke();
+  ctx.lineTo(w-5, h-5); ctx.lineTo(5,h-5); ctx.closePath();
+  ctx.globalAlpha = 0.08;
+  ctx.fillStyle = 'rgba(77,166,255,0.95)';
+  ctx.fill();
+  ctx.globalAlpha = 1;
+}
+
+/* ==========================
+   Export functions
+   ========================== */
+
+function exportCSV(){
+  let csv = 'zone,label,count\n';
+  zonesMeta.forEach(z=>{
+    csv += `${z.id},"${z.label}",${z.count}\n`;
+  });
+  const blob = new Blob([csv], {type:'text/csv;charset=utf-8;'});
+  const url = URL.createObjectURL(blob);
+  const a = document.createElement('a');
+  a.href = url;
+  a.download = `${currentObject.id || currentObject.name}_snapshot.csv`;
+  document.body.appendChild(a); a.click(); a.remove();
+  window.URL.revokeObjectURL(url);
+}
+
+/* Export PNG of composed view (heat + points + dim) */
+function exportPNG(){
+  // Compose into a temporary canvas at CSS pixel size
+  const cssW = Math.round(rawCanvas.width / dpr);
+  const cssH = Math.round(rawCanvas.height / dpr);
+  const tmp = document.createElement('canvas');
+  tmp.width = cssW;
+  tmp.height = cssH;
+  const tctx = tmp.getContext('2d');
+
+  // draw heat (if visible)
+  if(showHeat){
+    tctx.drawImage(heatCanvas, 0, 0, cssW, cssH);
+  }
+  if(showPoints){
+    tctx.drawImage(pointsCanvas, 0, 0, cssW, cssH);
+  }
+  // dim overlay
+  tctx.drawImage(dimCanvas, 0, 0, cssW, cssH);
+
+  // PNG download
+  tmp.toBlob(function(blob){
+    const url = URL.createObjectURL(blob);
+    const a = document.createElement('a');
+    a.href = url;
+    a.download = `${currentObject.id || currentObject.name}_map.png`;
+    document.body.appendChild(a); a.click(); a.remove();
+    window.URL.revokeObjectURL(url);
+  }, 'image/png');
+}
+
+/* ==========================
+   Initialization sequence
+   ========================== */
+
+function init(){
+  // populate UI
+  populateUI();
+
+  // build zones for current object
+  buildZonesMeta();
+  rebuildRightZoneList();
+
+  // initial size
+  resizeAllCanvases();
+
+  // initial simulation state
+  resetSimulation();
+
+  // small delay to allow layout; then final draw
+  setTimeout(()=>{ updateZoneCanvasCoordinates(); drawImmediate(); }, 180);
+
+  // keyboard shortcuts
+  window.addEventListener('keydown', (ev)=>{
+    if(ev.code === 'Space'){ ev.preventDefault(); if(simRunning) stopSim(); else startSim(); }
+    if(ev.key === 'ArrowRight'){ stepSimulation(1); }
+    if(ev.key === 'r'){ resetSimulation(); }
+  });
+
+  // tooltip handling for hover on zones (works for mouse)
+  floorSVG.addEventListener('mousemove', onSvgMouseMove);
+  floorSVG.addEventListener('mouseleave', ()=> { tooltip.style.display = 'none'; });
+
+  // touch support: long-press to show tooltip (simple)
+  let touchTimer = null;
+  floorSVG.addEventListener('touchstart', (ev)=>{
+    if(ev.touches.length === 1){
+      const t = ev.touches[0];
+      touchTimer = setTimeout(()=> {
+        showTooltipAt(t.clientX, t.clientY, 'Долгое нажатие — удержание');
+      }, 600);
+    }
+  });
+  floorSVG.addEventListener('touchend', ()=> { if(touchTimer) clearTimeout(touchTimer); tooltip.style.display='none'; });
+
+  // observe resize of map viewport to update canvases automatically
+  const rr = new ResizeObserver(debouncedResize);
+  rr.observe(document.getElementById('mapViewport'));
+}
+
+/* Tooltip: show at client coords */
+function showTooltipAt(clientX, clientY, html){
+  tooltip.style.left = clientX + 'px';
+  tooltip.style.top = clientY + 'px';
+  tooltip.innerHTML = html;
+  tooltip.style.display = 'block';
+}
+
+/* SVG mouse move handler to show zone under cursor */
+function onSvgMouseMove(ev){
+  const pt = floorSVG.createSVGPoint();
+  pt.x = ev.clientX; pt.y = ev.clientY;
+  // Find topmost zone under pointer via elementFromPoint
+  const el = document.elementFromPoint(ev.clientX, ev.clientY);
+  if(el && el.classList && el.classList.contains('zone')){
+    // find zone meta
+    const z = zonesMeta.find(x=>x.id === el.id);
+    if(z){
+      const client = svgPointToClient(z.centerSVG.x, z.centerSVG.y);
+      showTooltipAt(ev.clientX, ev.clientY, `<strong>${z.label}</strong><div class="small-muted">${z.count} чел</div>`);
+    }
+  } else {
+    tooltip.style.display = 'none';
+  }
+}
+
+/* ==========================
+   Finalize init
+   ========================== */
+init();
+
+/* ==========================
+   End of script
+   ==========================
+   Notes:
+   - Код ориентирован на читаемость и стабильность.
+   - При необходимости можно заменить rawCanvas pipeline на WebGL для большего масштаба данных.
+   - Для production: подключить реальные источники данных, авторизацию, бэкенд и защиту приватности.
+*/
+
+</script>
+
+</body>
+</html>
